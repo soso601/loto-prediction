@@ -3,7 +3,6 @@ numpy
 pandas
 matplotlib
 scikit-learn
-tf-keras
-tensorflow-cpu==2.15.0
+tensorflow-cpu
 beautifulsoup4
 requests
