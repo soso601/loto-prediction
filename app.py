@@ -1,5 +1,5 @@
 """
-🎰 Loto Agent IA - v3 : Filtres connectés + Observations complètes
+🎰 Loto Agent IA - v4 : Filtres connectés + Observations complètes + Page Tirages
 Lance avec : streamlit run app.py
 """
 import os
@@ -51,7 +51,6 @@ def load_and_prepare_data():
     if r is None: return None,None,None
     d=r.iloc[::-1].reset_index(drop=True)
     dd=d[ALL_DRAW_COLS].copy()
-    # Garder aussi les colonnes day et month_year pour les stats par jour/mois
     d_full = d[['day','month_year']+ALL_DRAW_COLS].copy() if 'day' in d.columns else dd.copy()
     return dd, build_all_features(dd), d_full
 
@@ -77,34 +76,27 @@ def compute_stats(_d):
     rdc=Counter()
     for _,row in d.iterrows():
         s=sum(int(row[c]) for c in NUM_COLS); rdc[reduction_numerologique(s)]+=1
-    # Écarts entre tirages successifs
     ecarts_moy=[]
     for i in range(1,t):
         ec=sum(abs(int(d.iloc[i][c])-int(d.iloc[i-1][c])) for c in NUM_COLS)/5
         ecarts_moy.append(ec)
-    # Consécutifs par tirage
     consec_list=[]
     for _,row in d.iterrows():
         nums=sorted([int(row[c]) for c in NUM_COLS])
         consec_list.append(sum(1 for j in range(4) if nums[j+1]-nums[j]==1))
-    # Amplitude par tirage
     amp_list=[]
     for _,row in d.iterrows():
         nums=[int(row[c]) for c in NUM_COLS]
         amp_list.append(max(nums)-min(nums))
-    # Dizaines
     decade_counts={f"{i*10+1}-{min(i*10+10,49)}":0 for i in range(5)}
     for _,row in d.iterrows():
         for c in NUM_COLS:
             n=int(row[c]); decade_counts[f"{(n-1)//10*10+1}-{min((n-1)//10*10+10,49)}"]+=1
-    # Pairs/impairs distribution
     pi_dist=Counter()
     for _,row in d.iterrows():
         np_=sum(1 for c in NUM_COLS if int(row[c])%2==0); pi_dist[np_]+=1
 
     # ═══ NOUVELLES ANALYSES ═══
-
-    # Fréquence par jour
     freq_par_jour = {}
     for jour in d['day'].unique() if 'day' in d.columns else []:
         dj = d[d['day']==jour]
@@ -113,7 +105,6 @@ def compute_stats(_d):
         for c in NUM_COLS: fj.update(dj[c].values.tolist())
         freq_par_jour[jour] = {'freq': fj, 'total': len(dj)}
 
-    # Ratios jour (numéros qui favorisent un jour)
     ratios_jour = {}
     for jour, data in freq_par_jour.items():
         autres = Counter()
@@ -128,7 +119,6 @@ def compute_stats(_d):
             ratios[n] = round(pj / pa, 2) if pa > 0 else 1
         ratios_jour[jour] = ratios
 
-    # Fréquence par mois
     mois_map = {'janvier':1,'février':2,'mars':3,'avril':4,'mai':5,'juin':6,
                 'juillet':7,'août':8,'septembre':9,'octobre':10,'novembre':11,'décembre':12}
     def get_month(ds):
@@ -149,7 +139,6 @@ def compute_stats(_d):
             for c in NUM_COLS: fm.update(dm[c].values.tolist())
             freq_par_mois[mois_noms[m]] = {'freq': fm, 'total': len(dm)}
 
-    # Ratios mois
     ratios_mois = {}
     for mois, data in freq_par_mois.items():
         ratios = {}
@@ -159,19 +148,16 @@ def compute_stats(_d):
             ratios[n] = round(pm / pg, 2) if pg > 0 else 1
         ratios_mois[mois] = ratios
 
-    # Positions
     pos_freq = {}
     for c in NUM_COLS:
         pos_freq[c] = Counter(d[c].values.tolist())
 
-    # Trios
     trio_counter = Counter()
     for _, row in d.iterrows():
         nums = sorted([int(row[c]) for c in NUM_COLS])
         for trio in combinations(nums, 3): trio_counter[trio] += 1
     top_trios = trio_counter.most_common(20)
 
-    # Tendances récentes (50 derniers)
     d_recent = d.head(50) if len(d) > 50 else d
     freq_recent = Counter()
     for c in NUM_COLS: freq_recent.update(d_recent[c].values.tolist())
@@ -181,11 +167,9 @@ def compute_stats(_d):
         pg = fn.get(n, 0) / t * 100
         tendances[n] = {'recent': pr, 'global': pg, 'ratio': round(pr/pg, 2) if pg > 0 else 1}
 
-    # Terminaisons
     term_count = Counter()
     for n in an: term_count[n % 10] += 1
 
-    # Retard des paires
     paire_retards = {}
     for (a, b), cnt in tp:
         last = -1
@@ -194,7 +178,6 @@ def compute_stats(_d):
             if a in nums and b in nums: last = idx; break
         paire_retards[(a, b)] = {'count': cnt, 'retard': last if last >= 0 else 999}
 
-    # Répétitions entre tirages
     repeat_dist = Counter()
     repeat_per_num = Counter()
     for i in range(len(d)-1):
@@ -282,7 +265,6 @@ class ComboEngine:
     def generate_grids(s,n=20,predictions=None,model=None,scaler=None,df_features=None):
         valid=[];al=sorted(s.allowed_nums);cl=sorted(s.allowed_chance)
         if len(al)<5: return []
-        # LSTM
         if model and scaler and df_features is not None:
             for nl in [0.0,0.3,0.5,0.8,1.0,1.5,2.0]:
                 for _ in range(20):
@@ -319,7 +301,6 @@ class ComboEngine:
                             extra=list(np.random.choice(pool,miss,replace=False))
                             nums=sorted(base+extra);ch=pred[5] if pred[5] in s.allowed_chance else int(np.random.choice(cl))
                             if s._passes(nums,ch): valid.append((nums,ch,True))
-        # Chauds+retard
         hot=[n for n,_ in s.stats['freq_nums'].most_common(30) if n in s.allowed_nums]
         ovd=[n for n,_ in sorted(s.stats['retards'].items(),key=lambda x:x[1],reverse=True) if n in s.allowed_nums][:20]
         for _ in range(200):
@@ -328,19 +309,16 @@ class ComboEngine:
             if len(set(nums))==5:
                 ch=int(np.random.choice(cl))
                 if s._passes(nums,ch): valid.append((nums,ch,False))
-        # 1 par dizaine
         decs=[[n for n in range(d*10+1,min(d*10+11,50)) if n in s.allowed_nums] for d in range(5)]
         dok=[d for d in decs if d]
         if len(dok)>=5:
             for _ in range(200):
                 nums=sorted([int(np.random.choice(d)) for d in dok[:5]]);ch=int(np.random.choice(cl))
                 if len(set(nums))==5 and s._passes(nums,ch): valid.append((nums,ch,False))
-        # Aléatoire
         att=0
         while len(valid)<n*8 and att<80000:
             att+=1;nums=sorted(np.random.choice(al,5,replace=False));ch=int(np.random.choice(cl))
             if s._passes(list(nums),ch): valid.append((list(nums),ch,False))
-        # Score
         scored=[];seen=set()
         for nums,chance,il in valid:
             key=tuple(nums+[chance])
@@ -379,6 +357,19 @@ def render_tags(d):
 def extract_numbers(text,mx=49): return [int(n) for n in re.findall(r'\d+',text) if 1<=int(n)<=mx]
 def extract_single_number(text):
     nums=re.findall(r'\d+',text); return int(nums[0]) if nums else None
+
+# ═══ AJOUT MANUEL DE TIRAGE ═══
+def ajouter_tirage_manuel(csv_path, jour, date_str, nums, chance):
+    """Ajoute manuellement un tirage en haut du CSV."""
+    df = pd.read_csv(csv_path)
+    new_row = pd.DataFrame([{
+        'day': jour, 'month_year': date_str,
+        'num0': nums[0], 'num1': nums[1], 'num2': nums[2],
+        'num3': nums[3], 'num4': nums[4], 'chance': chance
+    }])
+    df = pd.concat([new_row, df], ignore_index=True)
+    df.to_csv(csv_path, index=False)
+    return True
 
 # ═══ CHATBOT ═══
 def chatbot_respond(msg,engine,stats,preds,model=None,scaler=None,df_features=None):
@@ -511,13 +502,13 @@ def main():
 
     # Sidebar
     st.sidebar.title("🎛 Navigation")
-    page=st.sidebar.radio("",["🎯 Grilles Optimisées","🧠 Prédictions LSTM","📊 Statistiques","🔬 Observations Complètes","🔮 Numérologie","⚖ Score ta Grille","📈 Tendances"])
+    page=st.sidebar.radio("",["🎯 Grilles Optimisées","🧠 Prédictions LSTM","📊 Statistiques","🔬 Observations Complètes","🔮 Numérologie","⚖ Score ta Grille","📈 Tendances","🎫 Tirages"])
 
     # LAYOUT
     page_col,chat_col=st.columns([3,2])
 
     with page_col:
-        # ═══ GRILLES — utilise le moteur du chatbot ═══
+        # ═══ GRILLES ═══
         if page=="🎯 Grilles Optimisées":
             st.header("🎯 Meilleures Grilles")
             if st.button("🔄 Régénérer",type="primary",use_container_width=True): st.rerun()
@@ -575,8 +566,6 @@ def main():
                     ratios = stats['ratios_jour'][jour]
                     jdata = stats['freq_par_jour'][jour]
                     st.markdown(f"### 🗓 {jour} ({jdata['total']} tirages)")
-
-                    # Top 5 qui explosent ce jour
                     sorted_up = sorted(ratios.items(), key=lambda x: x[1], reverse=True)
                     col1, col2 = st.columns(2)
                     with col1:
@@ -599,15 +588,12 @@ def main():
                     ratios = stats['ratios_mois'][mois]
                     mdata = stats['freq_par_mois'][mois]
                     sorted_r = sorted(ratios.items(), key=lambda x: x[1], reverse=True)
-
-                    # Top 3 et Flop 3
                     top3 = sorted_r[:3]
                     flop3 = sorted_r[-3:]
                     top_str = ' · '.join(f"**{n}**(x{r})" for n, r in top3)
                     flop_str = ' · '.join(f"**{n}**(x{r})" for n, r in flop3)
                     st.markdown(f"**{mois}** ({mdata['total']} tirages) — 🔥 {top_str} | ❄️ {flop_str}")
 
-                # Faits marquants
                 st.markdown("---")
                 st.markdown("### 💡 Faits marquants")
                 st.write("• Le **35** sort **68% plus souvent en Octobre** que sa moyenne")
@@ -633,12 +619,10 @@ def main():
             with t8:
                 st.subheader("📈 Tendances Récentes (50 derniers tirages)")
                 st.write("Comparaison avec la fréquence historique :")
-
                 st.markdown("**🚀 En forte hausse :**")
                 sorted_t = sorted(stats['tendances'].items(), key=lambda x: x[1]['ratio'], reverse=True)
                 for num, data in sorted_t[:10]:
                     st.write(f"**{num}** → {data['recent']:.1f}% récent vs {data['global']:.1f}% global (**x{data['ratio']}**)")
-
                 st.markdown("**📉 En forte baisse :**")
                 for num, data in sorted_t[-10:]:
                     st.write(f"**{num}** → {data['recent']:.1f}% récent vs {data['global']:.1f}% global (**x{data['ratio']}**)")
@@ -675,7 +659,7 @@ def main():
                 for num, count in stats['repeat_per_num'].most_common(10):
                     st.write(f"**{num}** → {count}x")
 
-        # ═══ OBSERVATIONS COMPLÈTES — NOUVELLE PAGE ═══
+        # ═══ OBSERVATIONS COMPLÈTES ═══
         elif page=="🔬 Observations Complètes":
             st.header("🔬 Observations Complètes")
             st.write(f"Analyse approfondie de **{stats['total']}** tirages historiques")
@@ -735,7 +719,6 @@ def main():
                 st.write("Réduction de chaque nombre à un seul chiffre (24 → 2+4 = 6)")
                 st.markdown("**Fréquence des réductions de la somme :**")
                 st.bar_chart(pd.DataFrame([{'Réduction':str(r),'Fréquence':stats['red_counter'].get(r,0)} for r in range(1,10)]).set_index('Réduction'))
-                # Numérologie par numéro
                 st.markdown("**Réduction la plus fréquente par position :**")
                 for c in NUM_COLS:
                     rc=Counter(df_draws[c].apply(reduction_numerologique).values.tolist())
@@ -790,6 +773,107 @@ def main():
             st.write(f"**Moyenne**: {stats['somme_moy']:.1f} | **Plage**: {stats['somme_moy']-stats['somme_std']:.0f}-{stats['somme_moy']+stats['somme_std']:.0f}")
             st.subheader("⭐ Numéro Chance")
             st.bar_chart(pd.DataFrame([{'N°':str(n),'Fréq':stats['freq_chance'].get(n,0)} for n in range(1,11)]).set_index('N°'))
+
+        # ═══ TIRAGES (NOUVELLE PAGE) ═══
+        elif page=="🎫 Tirages":
+            st.header("🎫 Historique des Tirages")
+
+            # --- Dernier tirage info ---
+            # df_full est en ordre ancien→récent, donc le dernier = .iloc[-1]
+            dernier_jour = df_full.iloc[-1]['day'] if 'day' in df_full.columns else ''
+            dernier_date = df_full.iloc[-1]['month_year'] if 'month_year' in df_full.columns else ''
+            st.caption(f"📅 Dernier tirage : **{dernier_jour} {dernier_date}** — {stats['total']} tirages au total")
+
+            # --- Ajout manuel (expander) ---
+            with st.expander("➕ Ajouter un tirage manuellement"):
+                st.caption("Ajoute le dernier tirage FDJ à la main :")
+                col_j, col_d = st.columns(2)
+                with col_j:
+                    jour_sel = st.selectbox("Jour", ["Lundi", "Mercredi", "Samedi"], key="tj")
+                with col_d:
+                    date_man = st.text_input("Date (ex: 12 avril 2026)", key="td")
+
+                cols_n = st.columns(6)
+                nums_man = []
+                for i in range(5):
+                    with cols_n[i]:
+                        nums_man.append(st.number_input(f"N°{i+1}", 1, 49, (i+1)*8, key=f"tn{i}"))
+                with cols_n[5]:
+                    chance_man = st.number_input("Chance", 1, 10, 1, key="tc")
+
+                if st.button("✅ Ajouter ce tirage", use_container_width=True):
+                    if not date_man:
+                        st.error("Entre la date !")
+                    elif len(set(nums_man)) < 5:
+                        st.error("Les 5 numéros doivent être différents !")
+                    else:
+                        ajouter_tirage_manuel(DRAWS_CSV_PATH, jour_sel, date_man, sorted(nums_man), chance_man)
+                        st.success(f"✅ Tirage du {jour_sel} {date_man} ajouté !")
+                        st.cache_data.clear()
+                        st.rerun()
+
+            st.markdown("---")
+
+            # --- Filtres ---
+            col_f1, col_f2, col_f3 = st.columns(3)
+            with col_f1:
+                search_date = st.text_input("🔍 Recherche par date", placeholder="ex: avril 2026", key="sd")
+            with col_f2:
+                search_num = st.text_input("🔍 Contient le numéro", placeholder="ex: 7", key="sn")
+            with col_f3:
+                nb_display = st.selectbox("Afficher", [20, 50, 100, 200, "Tous"], index=0, key="nd")
+
+            # --- Préparer les données (récent en premier) ---
+            df_show = df_full.copy()
+            df_show = df_show.iloc[::-1].reset_index(drop=True)
+
+            # Appliquer les filtres
+            if search_date:
+                mask = df_show['month_year'].str.contains(search_date, case=False, na=False)
+                mask |= df_show['day'].str.contains(search_date, case=False, na=False)
+                df_show = df_show[mask]
+
+            if search_num:
+                try:
+                    n_search = int(search_num)
+                    mask = pd.Series(False, index=df_show.index)
+                    for c in NUM_COLS:
+                        mask |= (df_show[c] == n_search)
+                    mask |= (df_show[CHANCE_COL] == n_search)
+                    df_show = df_show[mask]
+                except ValueError:
+                    pass
+
+            # --- Stats rapides du filtre ---
+            st.caption(f"**{len(df_show)}** tirages trouvés")
+
+            # --- Limiter l'affichage ---
+            if nb_display != "Tous":
+                df_page = df_show.head(int(nb_display))
+            else:
+                df_page = df_show
+
+            # --- Affichage des tirages avec boules ---
+            for idx, (_, row) in enumerate(df_page.iterrows()):
+                nums = [int(row[c]) for c in NUM_COLS]
+                ch = int(row[CHANCE_COL])
+                jour = row['day'] if 'day' in row.index else ''
+                date_txt = row['month_year'] if 'month_year' in row.index else ''
+                sm = sum(nums)
+                np_ = sum(1 for n in nums if n % 2 == 0)
+                rd = reduction_numerologique(sm)
+
+                col1, col2, col3 = st.columns([2, 5, 3])
+                with col1:
+                    st.markdown(f"**{jour}**")
+                    st.caption(date_txt)
+                with col2:
+                    st.markdown(render_balls(nums, ch), unsafe_allow_html=True)
+                with col3:
+                    st.caption(f"Σ {sm} → {rd} | {np_}P/{5-np_}I | Amp {max(nums)-min(nums)}")
+
+                if idx < len(df_page) - 1:
+                    st.markdown("<hr style='margin:4px 0;border:none;border-top:1px solid rgba(255,255,255,0.05)'>", unsafe_allow_html=True)
 
     # ═══ CHATBOT ═══
     with chat_col:
