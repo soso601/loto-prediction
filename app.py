@@ -40,10 +40,12 @@ st.markdown("""<style>
 @st.cache_resource
 def load_model_cached():
     from keras.models import load_model as kl
-    if not os.path.exists(MODEL_PATH): return None,None
-    m=kl(MODEL_PATH)
+    if not os.path.exists(SCALER_PATH): return None,None,None,None
     with open(SCALER_PATH,'rb') as f: s=pickle.load(f)
-    return m,s
+    m_seq = kl(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
+    m_bi = kl(MODEL_BIDIRECTIONAL_PATH) if os.path.exists(MODEL_BIDIRECTIONAL_PATH) else None
+    m_ae = kl(MODEL_AUTOENCODER_PATH) if os.path.exists(MODEL_AUTOENCODER_PATH) else None
+    return m_seq, m_bi, m_ae, s
 
 @st.cache_data
 def load_and_prepare_data():
@@ -479,7 +481,7 @@ def chatbot_respond(msg,engine,stats,preds,model=None,scaler=None,df_features=No
 def main():
     st.markdown('<h1 class="main-title">🎰 Loto Agent IA</h1>',unsafe_allow_html=True)
     st.markdown('<p class="subtitle">Intelligence artificielle au service de tes grilles</p>',unsafe_allow_html=True)
-    model,scaler=load_model_cached(); df_draws,df_features,df_full=load_and_prepare_data()
+    model,model_bi,model_ae,scaler=load_model_cached(); df_draws,df_features,df_full=load_and_prepare_data()
     if df_draws is None: st.error("❌ Place tirages_loto.csv dans data/"); return
     stats=compute_stats(df_full)
     preds=[]
@@ -494,8 +496,9 @@ def main():
     # Stats header
     c1,c2,c3,c4=st.columns(4)
     combos=engine.count_combos();red=(1-combos/TOTAL_COMBINATIONS)*100
+    nb_models = sum(1 for m in [model, model_bi, model_ae] if m is not None)
     with c1: st.markdown(f'<div class="stat-card"><div class="stat-number">{stats["total"]}</div><div class="stat-label">Tirages</div></div>',unsafe_allow_html=True)
-    with c2: st.markdown(f'<div class="stat-card"><div class="stat-number">{"✅" if model else "❌"}</div><div class="stat-label">LSTM</div></div>',unsafe_allow_html=True)
+    with c2: st.markdown(f'<div class="stat-card"><div class="stat-number">{nb_models}/3</div><div class="stat-label">Modèles IA</div></div>',unsafe_allow_html=True)
     with c3: st.markdown(f'<div class="stat-card"><div class="stat-number">64</div><div class="stat-label">Features</div></div>',unsafe_allow_html=True)
     with c4: st.markdown(f'<div class="stat-card"><div class="stat-number">{combos:,}</div><div class="stat-label">Combos (-{red:.1f}%)</div></div>',unsafe_allow_html=True)
     st.markdown("---")
@@ -528,13 +531,58 @@ def main():
 
         # ═══ LSTM ═══
         elif page=="🧠 Prédictions LSTM":
-            st.header("🧠 Prédictions LSTM")
-            if not model: st.warning("Pas de modèle."); st.stop()
-            with st.spinner("..."): pr=generate_predictions(model,scaler,df_features,8)
-            for i,pred in enumerate(pr,1): st.markdown(f"**Grille {i}** : {render_balls(pred[:5],pred[5])}",unsafe_allow_html=True)
-            st.markdown("---");st.subheader("📊 Consensus")
-            an=[n for p in pr for n in p[:5]]
-            st.bar_chart(pd.DataFrame([{'N°':str(n),'×':c} for n,c in Counter(an).most_common(15)]).set_index('N°'))
+            st.header("🧠 Prédictions IA — 3 Modèles")
+
+            any_model = model or model_bi or model_ae
+            if not any_model: st.warning("Aucun modèle trouvé dans saved_models/."); st.stop()
+
+            col_seq, col_bi, col_ae = st.columns(3)
+
+            # --- Sequential ---
+            with col_seq:
+                st.markdown("### 🔵 Sequential")
+                if model:
+                    with st.spinner("..."): pr_seq = generate_predictions(model, scaler, df_features, 5)
+                    for i, pred in enumerate(pr_seq, 1):
+                        st.markdown(f"**{i}.** {render_balls(pred[:5], pred[5])}", unsafe_allow_html=True)
+                else:
+                    pr_seq = []
+                    st.warning("Modèle non trouvé")
+
+            # --- Bidirectionnel ---
+            with col_bi:
+                st.markdown("### 🟢 Bidirectionnel")
+                if model_bi:
+                    with st.spinner("..."): pr_bi = generate_predictions(model_bi, scaler, df_features, 5)
+                    for i, pred in enumerate(pr_bi, 1):
+                        st.markdown(f"**{i}.** {render_balls(pred[:5], pred[5])}", unsafe_allow_html=True)
+                else:
+                    pr_bi = []
+                    st.warning("Modèle non trouvé")
+
+            # --- AutoEncoder ---
+            with col_ae:
+                st.markdown("### 🟠 AutoEncoder")
+                if model_ae:
+                    with st.spinner("..."): pr_ae = generate_predictions(model_ae, scaler, df_features, 5)
+                    for i, pred in enumerate(pr_ae, 1):
+                        st.markdown(f"**{i}.** {render_balls(pred[:5], pred[5])}", unsafe_allow_html=True)
+                else:
+                    pr_ae = []
+                    st.warning("Modèle non trouvé")
+
+            # --- Consensus des 3 modèles ---
+            st.markdown("---")
+            st.subheader("📊 Consensus des 3 modèles")
+            all_preds = pr_seq + pr_bi + pr_ae
+            if all_preds:
+                all_nums = [n for p in all_preds for n in p[:5]]
+                all_chance = [p[5] for p in all_preds]
+                st.markdown("**Numéros les plus prédits :**")
+                st.bar_chart(pd.DataFrame([{'N°': str(n), '×': c} for n, c in Counter(all_nums).most_common(15)]).set_index('N°'))
+                st.markdown("**Numéro Chance le plus prédit :**")
+                top_ch = Counter(all_chance).most_common(3)
+                st.write(' · '.join(f"⭐ **{n}** ({c}×)" for n, c in top_ch))
 
         # ═══ STATISTIQUES ═══
         elif page=="📊 Statistiques":

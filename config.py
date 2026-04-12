@@ -41,6 +41,8 @@ ALL_DRAW_COLS = NUM_COLS + [CHANCE_COL]
 # ──────────────────────────────────────────────
 MODEL_DIR = 'saved_models'
 MODEL_PATH = f'{MODEL_DIR}/loto_lstm_model.keras'
+MODEL_BIDIRECTIONAL_PATH = f'{MODEL_DIR}/loto_bidirectional_model.keras'
+MODEL_AUTOENCODER_PATH = f'{MODEL_DIR}/loto_autoencoder_model.keras'
 SCALER_PATH = f'{MODEL_DIR}/scaler.pkl'
 HISTORY_PATH = f'{MODEL_DIR}/training_history.pkl'
 DRAWS_CSV_PATH = 'data/tirages_loto.csv'
