@@ -198,7 +198,8 @@ def compute_stats(_d):
             'pos_freq':pos_freq,'top_trios':top_trios,
             'tendances':tendances,'term_count':term_count,
             'paire_retards':paire_retards,'repeat_dist':repeat_dist,
-            'repeat_per_num':repeat_per_num, 'freq_recent':freq_recent}
+            'repeat_per_num':repeat_per_num, 'freq_recent':freq_recent,
+            'data_ref': d}
 
 # ═══ MOTEUR ═══
 class ComboEngine:
@@ -821,9 +822,11 @@ def main():
         # ═══ STATISTIQUES ═══
         elif page=="📊 Statistiques":
             st.header("📊 Statistiques Complètes")
-            t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11=st.tabs([
+            t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20=st.tabs([
                 "🔥 Chauds/Froids","⏰ Retards","👯 Paires","📅 Par Jour","📆 Par Mois",
-                "📍 Positions","👯‍♂️ Trios","📈 Tendances","🔢 Terminaisons","🔴 Retard Paires","🔄 Répétitions"
+                "📍 Positions","👯‍♂️ Trios","📈 Tendances","🔢 Terminaisons","🔴 Retard Paires","🔄 Répétitions",
+                "⭐ Chance+Nums","⭐ Chance/Jour","⭐ Répét. Chance","⚖ P/I par Jour",
+                "👯 Paires/Jour","🔢 Term/Jour","Σ Sommes/Jour","👯 Retard Paires","🏆 Jackpots"
             ])
 
             with t1:
@@ -940,6 +943,258 @@ def main():
                 st.markdown("**Numéros qui se répètent le plus au tirage suivant :**")
                 for num, count in stats['repeat_per_num'].most_common(10):
                     st.write(f"**{num}** → {count}x")
+
+            # ═══ NOUVEAUX ONGLETS ═══
+
+            with t12:
+                st.subheader("⭐ Numéros qui sortent avec chaque Chance")
+                st.write("Quels numéros apparaissent le plus souvent avec chaque numéro chance ?")
+                d = stats['data_ref']
+                for ch_val in range(1, 11):
+                    d_ch = d[d[CHANCE_COL] == ch_val]
+                    if len(d_ch) < 5: continue
+                    freq_with_ch = Counter()
+                    for c in NUM_COLS: freq_with_ch.update(d_ch[c].values.tolist())
+                    top5 = freq_with_ch.most_common(8)
+                    top_str = ' · '.join(f"**{n}**({c}x)" for n, c in top5)
+                    st.markdown(f"⭐ **Chance {ch_val}** ({len(d_ch)} tirages) → {top_str}")
+                # Config spéciale 3P/2I + chance 5 ou 6
+                st.markdown("---")
+                st.markdown("### 🔍 Config 3P/2I + Chance 5 ou 6")
+                d_special = d[d[CHANCE_COL].isin([5, 6])].copy()
+                d_special['nb_pairs'] = sum((d_special[c] % 2 == 0).astype(int) for c in NUM_COLS)
+                d_3p2i = d_special[d_special['nb_pairs'] == 3]
+                if len(d_3p2i) > 0:
+                    st.write(f"**{len(d_3p2i)}** tirages avec 3 pairs/2 impairs + chance 5 ou 6")
+                    freq_3p = Counter()
+                    for c in NUM_COLS: freq_3p.update(d_3p2i[c].values.tolist())
+                    top10 = freq_3p.most_common(10)
+                    st.write("Numéros favoris : " + ' · '.join(f"**{n}**({c}x)" for n, c in top10))
+                else:
+                    st.write("Pas assez de données pour cette configuration.")
+
+            with t13:
+                st.subheader("⭐ Fréquence du Numéro Chance selon le Jour")
+                st.write("Quel numéro chance sort le plus chaque jour ?")
+                d = stats['data_ref']
+                for jour in ['Lundi', 'Mercredi', 'Samedi']:
+                    if 'day' not in d.columns: break
+                    dj = d[d['day'] == jour]
+                    if len(dj) < 10: continue
+                    ch_freq = Counter(dj[CHANCE_COL].values.tolist())
+                    st.markdown(f"### 🗓 {jour} ({len(dj)} tirages)")
+                    ch_data = []
+                    for n in range(1, 11):
+                        cnt = ch_freq.get(n, 0)
+                        pct = cnt / len(dj) * 100
+                        ch_data.append({'Chance': n, 'Sorties': cnt, '%': f"{pct:.1f}%"})
+                    st.dataframe(pd.DataFrame(ch_data), use_container_width=True, hide_index=True)
+                    top3 = ch_freq.most_common(3)
+                    st.write("Top : " + ' · '.join(f"⭐ **{n}** ({c}x)" for n, c in top3))
+                    st.markdown("---")
+
+            with t14:
+                st.subheader("⭐ Répétition du Numéro Chance au tirage suivant")
+                st.write("Est-ce que le numéro chance se répète souvent d'un tirage à l'autre ?")
+                d = stats['data_ref']
+                ch_vals = d[CHANCE_COL].values
+                repeats = 0
+                repeat_which = Counter()
+                for i in range(1, len(ch_vals)):
+                    if ch_vals[i] == ch_vals[i-1]:
+                        repeats += 1
+                        repeat_which[int(ch_vals[i])] += 1
+                pct_rep = repeats / (len(ch_vals)-1) * 100
+                st.write(f"Le chance se répète dans **{repeats}** tirages sur {len(ch_vals)-1} (**{pct_rep:.1f}%**)")
+                st.markdown("**Quels numéros chance se répètent le plus ?**")
+                for n, c in repeat_which.most_common(10):
+                    st.write(f"⭐ **{n}** → se répète {c}x")
+                # Retard de chaque chance
+                st.markdown("---")
+                st.markdown("**Retard actuel de chaque numéro chance :**")
+                for n in range(1, 11):
+                    ret_ch = stats['retards_chance'].get(n, 0)
+                    status = "🔴" if ret_ch > 15 else "🟡" if ret_ch > 8 else "🟢"
+                    st.write(f"{status} ⭐ **{n}** → {ret_ch} tirages")
+
+            with t15:
+                st.subheader("⚖ Répartition Pair/Impair selon le Jour")
+                st.write("La config P/I change-t-elle selon le jour de tirage ?")
+                d = stats['data_ref']
+                for jour in ['Lundi', 'Mercredi', 'Samedi']:
+                    if 'day' not in d.columns: break
+                    dj = d[d['day'] == jour]
+                    if len(dj) < 10: continue
+                    pi_jour = Counter()
+                    for _, row in dj.iterrows():
+                        np_ = sum(1 for c in NUM_COLS if int(row[c]) % 2 == 0)
+                        pi_jour[np_] += 1
+                    st.markdown(f"### 🗓 {jour} ({len(dj)} tirages)")
+                    pi_data = []
+                    for p in range(6):
+                        cnt = pi_jour.get(p, 0)
+                        pct = cnt / len(dj) * 100
+                        pi_data.append({'Config': f"{p}P/{5-p}I", 'Tirages': cnt, '%': f"{pct:.1f}%"})
+                    st.dataframe(pd.DataFrame(pi_data), use_container_width=True, hide_index=True)
+                # Retard des configs P/I
+                st.markdown("---")
+                st.markdown("### ⏰ Retard des configurations P/I")
+                st.write("Depuis combien de tirages chaque config n'est pas sortie ?")
+                d_reversed = d.iloc[::-1].reset_index(drop=True)
+                for p in range(6):
+                    for idx, (_, row) in enumerate(d_reversed.iterrows()):
+                        np_ = sum(1 for c in NUM_COLS if int(row[c]) % 2 == 0)
+                        if np_ == p:
+                            st.write(f"**{p}P/{5-p}I** → dernier il y a **{idx}** tirages")
+                            break
+
+            with t16:
+                st.subheader("👯 Paires et Trios par Jour")
+                st.write("Les paires/trios les plus fréquents sortent-ils plus certains jours ?")
+                d = stats['data_ref']
+                # Top 10 paires globales
+                top10_paires = stats['top_paires'][:10]
+                for jour in ['Lundi', 'Mercredi', 'Samedi']:
+                    if 'day' not in d.columns: break
+                    dj = d[d['day'] == jour]
+                    if len(dj) < 10: continue
+                    st.markdown(f"### 🗓 {jour} ({len(dj)} tirages)")
+                    # Paires ce jour
+                    paires_jour = Counter()
+                    for _, row in dj.iterrows():
+                        nums = sorted([int(row[c]) for c in NUM_COLS])
+                        for p in combinations(nums, 2): paires_jour[p] += 1
+                    top5_j = paires_jour.most_common(5)
+                    st.markdown("**Top 5 paires :**")
+                    for (a, b), cnt in top5_j:
+                        pct = cnt / len(dj) * 100
+                        st.write(f"**{a} - {b}** → {cnt}x ({pct:.1f}%)")
+                    # Trios ce jour
+                    trios_jour = Counter()
+                    for _, row in dj.iterrows():
+                        nums = sorted([int(row[c]) for c in NUM_COLS])
+                        for trio in combinations(nums, 3): trios_jour[trio] += 1
+                    top3_t = trios_jour.most_common(3)
+                    st.markdown("**Top 3 trios :**")
+                    for (a, b, c_val), cnt in top3_t:
+                        st.write(f"**{a} - {b} - {c_val}** → {cnt}x")
+                    st.markdown("---")
+                # Retard des top paires
+                st.markdown("### ⏰ Retard des paires fréquentes")
+                st.write("Combien de tirages depuis la dernière apparition ?")
+                d_rev = d.iloc[::-1].reset_index(drop=True)
+                for (a, b), total_cnt in top10_paires:
+                    for idx, (_, row) in enumerate(d_rev.iterrows()):
+                        nums = set(int(row[c]) for c in NUM_COLS)
+                        if a in nums and b in nums:
+                            status = "🔴" if idx > 50 else "🟡" if idx > 20 else "🟢"
+                            st.write(f"{status} **{a}-{b}** ({total_cnt}x total) → dernier il y a **{idx}** tirages")
+                            break
+
+            with t17:
+                st.subheader("🔢 Terminaisons par Jour")
+                st.write("Fréquence des terminaisons (0-9) selon le jour + répétition au tirage suivant")
+                d = stats['data_ref']
+                for jour in ['Lundi', 'Mercredi', 'Samedi']:
+                    if 'day' not in d.columns: break
+                    dj = d[d['day'] == jour]
+                    if len(dj) < 10: continue
+                    st.markdown(f"### 🗓 {jour} ({len(dj)} tirages)")
+                    term_jour = Counter()
+                    for _, row in dj.iterrows():
+                        for c in NUM_COLS: term_jour[int(row[c]) % 10] += 1
+                    total_nums = len(dj) * 5
+                    term_data = []
+                    for t_val in range(10):
+                        cnt = term_jour.get(t_val, 0)
+                        pct = cnt / total_nums * 100
+                        term_data.append({'Terminaison': t_val, 'Sorties': cnt, '%': f"{pct:.1f}%"})
+                    st.dataframe(pd.DataFrame(term_data), use_container_width=True, hide_index=True)
+                    st.markdown("---")
+                # Répétition des terminaisons au tirage suivant
+                st.markdown("### 🔄 Terminaisons qui se répètent au tirage suivant")
+                term_repeats = Counter()
+                term_total = Counter()
+                for i in range(1, len(d)):
+                    curr_terms = set(int(d.iloc[i][c]) % 10 for c in NUM_COLS)
+                    prev_terms = set(int(d.iloc[i-1][c]) % 10 for c in NUM_COLS)
+                    for t_val in prev_terms: term_total[t_val] += 1
+                    for t_val in curr_terms & prev_terms: term_repeats[t_val] += 1
+                for t_val in range(10):
+                    rep = term_repeats.get(t_val, 0)
+                    tot = term_total.get(t_val, 1)
+                    pct = rep / tot * 100 if tot > 0 else 0
+                    st.write(f"Terminaison **{t_val}** → se répète **{pct:.1f}%** du temps ({rep}/{tot})")
+
+            with t18:
+                st.subheader("Σ Distribution des Sommes selon le Jour")
+                st.write("La somme des 5 numéros varie-t-elle selon le jour ?")
+                d = stats['data_ref']
+                for jour in ['Lundi', 'Mercredi', 'Samedi']:
+                    if 'day' not in d.columns: break
+                    dj = d[d['day'] == jour]
+                    if len(dj) < 10: continue
+                    sommes_j = dj[NUM_COLS].sum(axis=1).values
+                    moy_j = np.mean(sommes_j)
+                    std_j = np.std(sommes_j)
+                    st.markdown(f"### 🗓 {jour} ({len(dj)} tirages)")
+                    st.write(f"**Moyenne** : {moy_j:.1f} | **Écart-type** : {std_j:.1f} | **Plage optimale** : {moy_j-std_j:.0f}-{moy_j+std_j:.0f}")
+                    st.write(f"**vs Global** : {stats['somme_moy']:.1f} (écart de {abs(moy_j - stats['somme_moy']):.1f})")
+                    st.markdown("---")
+                # Écart de somme entre tirages successifs
+                st.markdown("### 📐 Écart de somme entre tirages successifs")
+                st.write("Comment la somme évolue d'un tirage au suivant ?")
+                sommes_all = d[NUM_COLS].sum(axis=1).values
+                ecarts_somme = [abs(int(sommes_all[i]) - int(sommes_all[i-1])) for i in range(1, len(sommes_all))]
+                if ecarts_somme:
+                    st.write(f"**Écart moyen** : {np.mean(ecarts_somme):.1f} | **Max** : {max(ecarts_somme)} | **Min** : {min(ecarts_somme)}")
+                    st.line_chart(pd.DataFrame({'Écart de somme': ecarts_somme[-100:]}))
+
+            with t19:
+                st.subheader("👯 Retard des Paires et Trios")
+                st.write("Combien de tirages entre chaque apparition des paires/trios fréquents ?")
+                d = stats['data_ref']
+                # Retard moyen des top paires
+                st.markdown("**Paires — intervalle moyen entre apparitions :**")
+                for (a, b), total_cnt in stats['top_paires'][:10]:
+                    apparitions = []
+                    for idx, (_, row) in enumerate(d.iterrows()):
+                        nums = set(int(row[c]) for c in NUM_COLS)
+                        if a in nums and b in nums: apparitions.append(idx)
+                    if len(apparitions) >= 2:
+                        intervals = [apparitions[i+1] - apparitions[i] for i in range(len(apparitions)-1)]
+                        moy_int = np.mean(intervals)
+                        st.write(f"**{a}-{b}** ({total_cnt}x) → revient tous les **{moy_int:.0f}** tirages en moyenne (min: {min(intervals)}, max: {max(intervals)})")
+                    else:
+                        st.write(f"**{a}-{b}** ({total_cnt}x) → pas assez de données")
+                # Trios
+                st.markdown("---")
+                st.markdown("**Trios — intervalle moyen entre apparitions :**")
+                for (a, b, c_val), total_cnt in stats['top_trios'][:10]:
+                    apparitions = []
+                    for idx, (_, row) in enumerate(d.iterrows()):
+                        nums = set(int(row[c]) for c in NUM_COLS)
+                        if a in nums and b in nums and c_val in nums: apparitions.append(idx)
+                    if len(apparitions) >= 2:
+                        intervals = [apparitions[i+1] - apparitions[i] for i in range(len(apparitions)-1)]
+                        moy_int = np.mean(intervals)
+                        st.write(f"**{a}-{b}-{c_val}** ({total_cnt}x) → revient tous les **{moy_int:.0f}** tirages (min: {min(intervals)}, max: {max(intervals)})")
+                    else:
+                        st.write(f"**{a}-{b}-{c_val}** ({total_cnt}x) → pas assez de données")
+
+            with t20:
+                st.subheader("🏆 Analyse des Jackpots")
+                st.write("⚠️ Les données de jackpot ne sont pas dans le CSV actuel.")
+                st.write("Pour activer cette analyse, il faudrait ajouter une colonne `jackpot` (oui/non) au fichier tirages_loto.csv.")
+                st.markdown("---")
+                st.markdown("### 💡 Ce que cette analyse pourrait montrer :")
+                st.write("• Les numéros les plus souvent tirés lors d'un jackpot remporté")
+                st.write("• Les configurations P/I des tirages gagnants")
+                st.write("• La plage de sommes des tirages gagnants")
+                st.write("• Les paires/trios présents dans les jackpots")
+                st.write("• Comparaison jackpot vs non-jackpot pour détecter des patterns")
+                st.markdown("---")
+                st.info("💡 Pour ajouter les données jackpot : ajoute une colonne `jackpot` avec 1 (remporté) ou 0 (non remporté) dans ton CSV, puis on activera l'analyse complète.")
 
         # ═══ OBSERVATIONS COMPLÈTES ═══
         elif page=="🔬 Observations Complètes":
