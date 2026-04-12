@@ -373,8 +373,242 @@ def ajouter_tirage_manuel(csv_path, jour, date_str, nums, chance):
     df.to_csv(csv_path, index=False)
     return True
 
-# ═══ CHATBOT ═══
-def chatbot_respond(msg,engine,stats,preds,model=None,scaler=None,df_features=None):
+# ═══ CHATBOT CLAUDE API ═══
+def build_stats_summary(stats, engine):
+    """Construit un résumé des stats pour le prompt système de Claude."""
+    top10_hot = [(n, c) for n, c in stats['freq_nums'].most_common(10)]
+    top10_cold = [(n, c) for n, c in list(reversed(stats['freq_nums'].most_common()))[:10]]
+    top10_retard = sorted(stats['retards'].items(), key=lambda x: x[1], reverse=True)[:10]
+    top5_paires = stats['top_paires'][:5]
+
+    # Tendances récentes
+    sorted_t = sorted(stats['tendances'].items(), key=lambda x: x[1]['ratio'], reverse=True)
+    top5_hausse = sorted_t[:5]
+    top5_baisse = sorted_t[-5:]
+
+    summary = f"""STATISTIQUES LOTO ({stats['total']} tirages analysés):
+
+Numéros CHAUDS (les plus fréquents): {', '.join(f'{n}({c}x)' for n,c in top10_hot)}
+Numéros FROIDS (les moins fréquents): {', '.join(f'{n}({c}x)' for n,c in top10_cold)}
+Numéros en RETARD (pas sortis depuis longtemps): {', '.join(f'{n}({r} tirages)' for n,r in top10_retard)}
+Paires fréquentes: {', '.join(f'{a}-{b}({c}x)' for (a,b),c in top5_paires)}
+Somme moyenne: {stats['somme_moy']:.1f} (écart-type: {stats['somme_std']:.1f})
+Plage optimale somme: {stats['somme_moy']-stats['somme_std']:.0f} à {stats['somme_moy']+stats['somme_std']:.0f}
+En hausse récente: {', '.join(f'{n}(x{d["ratio"]})' for n,d in top5_hausse)}
+En baisse récente: {', '.join(f'{n}(x{d["ratio"]})' for n,d in top5_baisse)}
+Chance les plus fréquents: {', '.join(f'{n}({c}x)' for n,c in stats['freq_chance'].most_common(5))}
+
+ÉTAT ACTUEL DU MOTEUR:
+Numéros disponibles: {len(engine.allowed_nums)}/49
+Combinaisons restantes: {engine.count_combos():,}
+Somme: {f'exacte={engine.exact_sum}' if engine.exact_sum else f'{engine.min_sum}-{engine.max_sum}'}
+Amplitude: {engine.min_amplitude}-{engine.max_amplitude}
+Max consécutifs: {engine.max_consecutive}
+Filtres actifs: {', '.join(engine.filters_log[-5:]) if engine.filters_log else 'Aucun'}"""
+    return summary
+
+def build_system_prompt(stats_summary):
+    """Construit le prompt système pour Claude."""
+    return f"""Tu es l'Agent IA du Loto, un assistant expert intégré dans une application de prédiction Loto.
+Tu parles français, tu es concis et dynamique. Tu utilises des emojis avec parcimonie.
+
+{stats_summary}
+
+ACTIONS DISPONIBLES - Réponds TOUJOURS en JSON avec cette structure:
+{{
+  "message": "Ta réponse à afficher à l'utilisateur",
+  "actions": [
+    {{"type": "action_name", "params": {{...}}}}
+  ]
+}}
+
+Actions possibles:
+- {{"type": "exclude_numbers", "params": {{"nums": [6, 15, 22]}}}} — Exclure des numéros
+- {{"type": "exclude_cold", "params": {{"n": 10}}}} — Exclure les N plus froids
+- {{"type": "exclude_recent", "params": {{"n": 10}}}} — Exclure les N plus récents
+- {{"type": "exclude_combo", "params": {{"nums": [6, 17]}}}} — Exclure une combinaison
+- {{"type": "keep_only", "params": {{"nums": [1, 5, 12, 23, 34]}}}} — Garder uniquement ces numéros
+- {{"type": "keep_hot", "params": {{"n": 25}}}} — Garder les N plus chauds
+- {{"type": "set_sum_range", "params": {{"min": 100, "max": 160}}}} — Plage de somme
+- {{"type": "set_exact_sum", "params": {{"value": 125}}}} — Somme exacte
+- {{"type": "apply_optimal_sum"}} — Appliquer la somme optimale
+- {{"type": "set_pairs", "params": {{"values": [2, 3]}}}} — Config pair/impair
+- {{"type": "set_max_consecutive", "params": {{"value": 1}}}} — Max consécutifs
+- {{"type": "set_amplitude", "params": {{"min": 20, "max": 42}}}} — Amplitude
+- {{"type": "set_chance", "params": {{"values": [1, 3, 5]}}}} — Numéros chance
+- {{"type": "set_numerology", "params": {{"values": [3, 6, 9]}}}} — Numérologie
+- {{"type": "reset"}} — Réinitialiser tous les filtres
+- {{"type": "generate_grids", "params": {{"n": 10}}}} — Générer N grilles
+- {{"type": "auto_strategy"}} — Appliquer la stratégie optimale automatique
+
+Si l'utilisateur pose une question sur les stats ou demande un conseil SANS action, mets "actions": [].
+Réponds TOUJOURS en JSON valide, rien d'autre."""
+
+def call_claude_api(message, stats_summary, conversation_history):
+    """Appelle l'API Claude et retourne la réponse."""
+    import requests as req
+    import json
+
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+
+    system = build_system_prompt(stats_summary)
+
+    # Construire les messages (garder les 10 derniers échanges)
+    messages = []
+    for msg in conversation_history[-10:]:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": message})
+
+    try:
+        resp = req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01"
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 1024,
+                "system": system,
+                "messages": messages
+            },
+            timeout=30
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            text = data["content"][0]["text"]
+            return text
+        else:
+            return None
+    except Exception:
+        return None
+
+def execute_actions(actions, engine, stats, preds, model, scaler, df_features):
+    """Exécute les actions retournées par Claude sur le moteur."""
+    results = []
+    for action in actions:
+        t = action.get("type", "")
+        p = action.get("params", {})
+        try:
+            if t == "exclude_numbers":
+                rm = engine.exclude_numbers(p.get("nums", []))
+                results.append(f"❌ {len(rm)} exclus")
+            elif t == "exclude_cold":
+                rm = engine.exclude_cold(p.get("n", 10))
+                results.append(f"❄️ {len(rm)} froids exclus")
+            elif t == "exclude_recent":
+                rm = engine.exclude_recent(p.get("n", 10))
+                results.append(f"🆕 {len(rm)} récents exclus")
+            elif t == "exclude_combo":
+                engine.exclude_combo(p.get("nums", []))
+                results.append("🚫 Combo exclue")
+            elif t == "keep_only":
+                engine.keep_only_numbers(p.get("nums", []))
+                results.append("✅ Numéros filtrés")
+            elif t == "keep_hot":
+                engine.keep_hot(p.get("n", 25))
+                results.append("🔥 Chauds gardés")
+            elif t == "set_sum_range":
+                engine.set_sum_range(p.get("min", 15), p.get("max", 245))
+                results.append(f"Σ {engine.min_sum}-{engine.max_sum}")
+            elif t == "set_exact_sum":
+                engine.set_exact_sum(p.get("value", 125))
+                results.append(f"Σ = {engine.exact_sum}")
+            elif t == "apply_optimal_sum":
+                engine.apply_optimal_sum()
+                results.append(f"Σ optimale {engine.min_sum}-{engine.max_sum}")
+            elif t == "set_pairs":
+                engine.set_pairs(p.get("values", [2, 3]))
+                results.append("⚖ Pairs configurés")
+            elif t == "set_max_consecutive":
+                engine.set_max_consecutive(p.get("value", 1))
+                results.append(f"🔗 Max {engine.max_consecutive}")
+            elif t == "set_amplitude":
+                engine.set_amplitude(p.get("min", 20), p.get("max", 42))
+                results.append(f"↔ {engine.min_amplitude}-{engine.max_amplitude}")
+            elif t == "set_chance":
+                engine.set_chance(p.get("values", []))
+                results.append(f"⭐ {sorted(engine.allowed_chance)}")
+            elif t == "set_numerology":
+                engine.set_numerology(p.get("values", []))
+                results.append(f"🔮 {sorted(engine.allowed_numer)}")
+            elif t == "reset":
+                engine.reset()
+                results.append("🔄 Reset")
+            elif t == "auto_strategy":
+                engine.reset()
+                engine.exclude_cold(8)
+                engine.apply_optimal_sum()
+                engine.set_pairs([2, 3])
+                engine.set_max_consecutive(1)
+                engine.set_amplitude(20, 42)
+                results.append("🧠 Stratégie auto appliquée")
+            elif t == "generate_grids":
+                n = min(p.get("n", 10), 20)
+                grids = engine.generate_grids(n=n, predictions=preds, model=model, scaler=scaler, df_features=df_features)
+                if grids:
+                    grid_text = ""
+                    for i, g in enumerate(grids, 1):
+                        lt = " 🧠" if g.get('lstm') else ""
+                        grid_text += f"**{i}.** {' - '.join(str(nn) for nn in g['nums'])} | ⭐ {g['chance']} *({g['score']})*{lt}\n\n"
+                    results.append(grid_text)
+                else:
+                    results.append("⚠️ Trop restrictif, aucune grille.")
+        except Exception:
+            continue
+    return results
+
+def chatbot_respond(msg, engine, stats, preds, model=None, scaler=None, df_features=None):
+    """Chatbot principal : essaie Claude API, sinon fallback if/else."""
+    import json
+
+    # Construire le résumé des stats
+    stats_summary = build_stats_summary(stats, engine)
+
+    # Historique de conversation (sans le message actuel)
+    history = [m for m in st.session_state.messages if m['role'] in ['user', 'assistant']]
+
+    # Appeler Claude API
+    raw = call_claude_api(msg, stats_summary, history)
+
+    if raw:
+        try:
+            # Nettoyer la réponse (enlever les ```json si présents)
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+
+            data = json.loads(cleaned)
+            message = data.get("message", "")
+            actions = data.get("actions", [])
+
+            # Exécuter les actions
+            if actions:
+                action_results = execute_actions(actions, engine, stats, preds, model, scaler, df_features)
+                # Ajouter le compteur de combos
+                message += f"\n\n🎯 **{engine.count_combos():,}** combinaisons"
+                # Ajouter les grilles générées
+                for r in action_results:
+                    if r.startswith("**1."):  # C'est une liste de grilles
+                        message += f"\n\n{r}"
+
+            return message
+        except (json.JSONDecodeError, KeyError, TypeError):
+            # Si le JSON est invalide, utiliser la réponse brute
+            if raw and len(raw) > 5:
+                return raw
+
+    # ═══ FALLBACK — ancien chatbot if/else ═══
+    return chatbot_respond_fallback(msg, engine, stats, preds, model, scaler, df_features)
+
+def chatbot_respond_fallback(msg, engine, stats, preds, model=None, scaler=None, df_features=None):
+    """Ancien chatbot if/else comme fallback si l'API est indisponible."""
     m=msg.lower().strip()
     if any(w in m for w in ['reset','recommencer','réinitialiser','annuler']):
         engine.reset(); return "🔄 Reset ! **19 068 840** combinaisons."
