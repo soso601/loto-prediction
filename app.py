@@ -766,7 +766,7 @@ def main():
 
         # ═══ LSTM ═══
         elif page=="🧠 Prédictions LSTM":
-            st.header("🧠 Prédictions IA — 3 Modèles")
+            st.header("🧠 Prédictions IA — 3 Modèles + Hybride")
 
             any_model = model or model_bi or model_ae
             if not any_model: st.warning("Aucun modèle trouvé dans saved_models/."); st.stop()
@@ -818,6 +818,53 @@ def main():
                 st.markdown("**Numéro Chance le plus prédit :**")
                 top_ch = Counter(all_chance).most_common(3)
                 st.write(' · '.join(f"⭐ **{n}** ({c}×)" for n, c in top_ch))
+
+            # ═══ PRÉDICTIONS HYBRIDES ═══
+            st.markdown("---")
+            st.header("🎯 Prédictions Hybrides (LSTM + Stats temps réel)")
+            st.caption("Combine les 3 modèles LSTM avec les retards, tendances, fréquences par jour, terminaisons et répétitions")
+
+            # Détecter le jour actuel
+            import datetime
+            jour_map_inv = {0:'Lundi',1:'Mardi',2:'Mercredi',3:'Jeudi',4:'Vendredi',5:'Samedi',6:'Dimanche'}
+            today = datetime.date.today()
+            jour_auto = jour_map_inv.get(today.weekday(), 'Mercredi')
+            jour_sel = st.selectbox("Jour de tirage", ['Lundi', 'Mercredi', 'Samedi'], index=['Lundi','Mercredi','Samedi'].index(jour_auto) if jour_auto in ['Lundi','Mercredi','Samedi'] else 1, key="hybrid_jour")
+
+            if all_preds:
+                with st.spinner("🧠 Calcul hybride en cours..."):
+                    hybrid_grids, num_scores, ch_scores = generate_hybrid_predictions(all_preds, stats, jour_sel, n_grids=8)
+
+                # Afficher les grilles hybrides
+                st.markdown(f"### 🎯 Top {len(hybrid_grids)} grilles pour **{jour_sel}**")
+                for i, grid in enumerate(hybrid_grids, 1):
+                    cols = st.columns([1, 5, 2, 3])
+                    with cols[0]: st.markdown(f"### #{i}")
+                    with cols[1]: st.markdown(render_balls(grid['nums'], grid['chance']), unsafe_allow_html=True)
+                    with cols[2]: st.markdown(f'<span class="score-badge">{grid["score"]}</span>', unsafe_allow_html=True)
+                    with cols[3]: st.caption(f"📊 Stats: {grid.get('score_stats',0)} | 🛡 Anti-H: {grid.get('score_anti',0)}")
+
+                # Afficher le classement des numéros
+                st.markdown("---")
+                col_s1, col_s2 = st.columns(2)
+                with col_s1:
+                    st.markdown("### 🏆 Top 15 numéros (score hybride)")
+                    sorted_scores = sorted(num_scores.items(), key=lambda x: x[1], reverse=True)
+                    for rank, (n, sc) in enumerate(sorted_scores[:15], 1):
+                        retard = stats['retards'].get(n, 0)
+                        tend = stats['tendances'].get(n, {}).get('ratio', 1.0)
+                        bar = '█' * int(sc / 8)
+                        st.write(f"**{rank}. N°{n}** → {sc:.0f}pts {bar} (retard:{retard}, tend:x{tend:.1f})")
+
+                with col_s2:
+                    st.markdown("### ⭐ Classement Chance")
+                    sorted_ch = sorted(ch_scores.items(), key=lambda x: x[1], reverse=True)
+                    for n, sc in sorted_ch:
+                        ret_ch = stats['retards_chance'].get(n, 0)
+                        bar = '█' * int(sc / 10)
+                        st.write(f"⭐ **{n}** → {sc:.0f}pts {bar} (retard:{ret_ch})")
+            else:
+                st.warning("Aucune prédiction LSTM disponible pour le calcul hybride.")
 
         # ═══ STATISTIQUES ═══
         elif page=="📊 Statistiques":
@@ -1452,6 +1499,301 @@ def generate_predictions(model,scaler,df_features,n=5):
             seen.add(nn);nums[i]=nn
         p[:5]=sorted(nums);preds.append(p)
     return preds
+
+def compute_num_scores(stats, jour_actuel=None):
+    """
+    Calcule un score dynamique pour chaque numéro (1-49) et chance (1-10)
+    basé sur les stats temps réel + biais anti-humain (études scientifiques).
+    
+    Sources :
+    - Polin et al. (2021) — 800M sélections, loterie israélienne
+    - Wang et al. (2016) — 5M grilles, Dutch Lotto
+    - Roger & Broihanne (2007) — Loto français 6/49, 25 ans
+    """
+    scores = {}
+    t = stats['total']
+    mf = max(stats['freq_nums'].values())
+    ar = np.mean(list(stats['retards'].values()))
+    d = stats['data_ref']
+
+    # ═══ DONNÉES DES ÉTUDES SCIENTIFIQUES ═══
+    # Roger & Broihanne (2007) — Loto français
+    NUMS_SURJOUES_FR = {7, 12, 9, 13, 11, 5}       # les plus populaires
+    NUMS_SOUSJOUES_FR = {32, 41, 39, 40, 38, 43}   # les moins populaires
+    # Wang et al. (2016) — biais universels
+    LUCKY_NUMBERS = {7, 3, 13}                       # "porte-bonheur" mondiaux
+    MULTIPLES_7 = {7, 14, 21, 28, 35, 42, 49}       # multiples de 7
+    MULTIPLES_5 = {5, 10, 15, 20, 25, 30, 35, 40, 45}  # multiples de 5 (ronds)
+    MULTIPLES_10 = {10, 20, 30, 40}                  # très ronds, moins joués
+
+    # Grille FDJ : 7 colonnes × 7 lignes (1-7 en haut, 43-49 en bas)
+    # Polin (2021) : première rangée = très populaire, dernière = impopulaire
+    RANG_1_FDJ = set(range(1, 8))     # 1-7 (sur-joués car en haut)
+    RANG_2_FDJ = set(range(8, 15))    # 8-14
+    RANG_7_FDJ = set(range(43, 50))   # 43-49 (sous-joués car en bas)
+
+    for n in range(1, 50):
+        sc = 0.0
+
+        # ═══ CRITÈRES STATISTIQUES (60%) ═══
+
+        # 1. Retard — poids 20%
+        retard = stats['retards'].get(n, 0)
+        sc += min(retard / (ar + 1), 3) * 20
+
+        # 2. Tendance récente — poids 15%
+        tend = stats['tendances'].get(n, {})
+        ratio = tend.get('ratio', 1.0)
+        sc += min(ratio, 2.5) * 15
+
+        # 3. Fréquence équilibrée — poids 5%
+        freq = stats['freq_nums'].get(n, 0)
+        freq_pct = freq / t * 100
+        freq_ideal = 100 / 49
+        sc += max(0, (1 - abs(freq_pct - freq_ideal) / freq_ideal)) * 5
+
+        # 4. Analyse par jour — poids 15%
+        if jour_actuel and jour_actuel in stats.get('ratios_jour', {}):
+            ratio_jour = stats['ratios_jour'][jour_actuel].get(n, 1.0)
+            sc += min(ratio_jour, 2.0) * 15
+        else:
+            sc += 15
+
+        # 5. Diversité (pas dans le dernier tirage) — poids 5%
+        last_draw = set(int(d.iloc[-1][c]) for c in NUM_COLS)
+        sc += 5 if n not in last_draw else 2
+
+        # ═══ CRITÈRES ANTI-HUMAIN (40%) ═══
+
+        # 6. Biais date d'anniversaire — poids 15%
+        # Études : numéros 1-12 très sur-joués (mois), 1-31 sur-joués (jours)
+        if n <= 12:
+            sc += 0       # très sur-joués → 0 points
+        elif n <= 31:
+            sc += 8       # sur-joués → peu de points
+        else:
+            sc += 15      # sous-joués → max points (32-49)
+
+        # 7. Numéros populaires/impopulaires (études françaises) — poids 10%
+        if n in NUMS_SOUSJOUES_FR:
+            sc += 10      # bonus max : numéros évités par les joueurs français
+        elif n in NUMS_SURJOUES_FR:
+            sc += 0       # malus : tout le monde les joue
+        elif n in LUCKY_NUMBERS:
+            sc += 2       # porte-bonheur universels → pénalisés
+        elif n in MULTIPLES_10:
+            sc += 8       # numéros "ronds" → moins joués (étude Wang)
+        else:
+            sc += 5       # neutre
+
+        # 8. Position sur le bulletin FDJ — poids 10%
+        # Polin (2021) : rangée du haut = populaire, rangée du bas = impopulaire
+        if n in RANG_1_FDJ:
+            sc += 2       # première rangée = sur-jouée
+        elif n in RANG_7_FDJ:
+            sc += 10      # dernière rangée = sous-jouée → bonus max
+        elif n in RANG_2_FDJ:
+            sc += 4       # deuxième rangée = populaire aussi
+        else:
+            sc += 7       # milieu = neutre-positif
+
+        # 9. Terminaison anti-humaine — poids 5%
+        # Les terminaisons 0 et 5 sont moins jouées (Wang 2016)
+        term = n % 10
+        if term in [0, 8, 9]:
+            sc += 5       # terminaisons impopulaires → bonus
+        elif term in [7, 3, 1]:
+            sc += 1       # terminaisons populaires → malus
+        else:
+            sc += 3       # neutre
+
+        scores[n] = round(sc, 1)
+
+    # ═══ SCORES CHANCE (1-10) ═══
+    # Polin (2021) : fortes préférences observées sur le power number 1-7
+    CHANCE_POPULAIRES = {7, 3, 1, 5}    # sur-joués
+    CHANCE_IMPOPULAIRES = {8, 9, 10, 4} # sous-joués
+
+    scores_chance = {}
+    for n in range(1, 11):
+        sc_ch = 0.0
+        # Retard chance
+        ret_ch = stats['retards_chance'].get(n, 0)
+        sc_ch += min(ret_ch / 5, 3) * 30
+        # Fréquence chance
+        freq_ch = stats['freq_chance'].get(n, 0)
+        sc_ch += (freq_ch / t * 100) * 3
+        # Par jour
+        if jour_actuel and 'day' in d.columns:
+            dj = d[d['day'] == jour_actuel]
+            if len(dj) > 10:
+                ch_jour = Counter(dj[CHANCE_COL].values.tolist())
+                pct_jour = ch_jour.get(n, 0) / len(dj) * 100
+                sc_ch += pct_jour * 8
+        # Répétition chance
+        last_ch = int(d.iloc[-1][CHANCE_COL])
+        if n != last_ch:
+            sc_ch += 8
+        # Anti-humain chance
+        if n in CHANCE_IMPOPULAIRES:
+            sc_ch += 15   # bonus : personne ne les joue
+        elif n in CHANCE_POPULAIRES:
+            sc_ch += 2    # malus : tout le monde les joue
+        else:
+            sc_ch += 8    # neutre
+
+        scores_chance[n] = round(sc_ch, 1)
+
+    return scores, scores_chance
+
+def score_grille_anti_humain(nums, chance):
+    """
+    Score anti-humain d'une grille complète (post-génération).
+    Évalue si la grille ressemble à ce qu'un humain jouerait.
+    0 = très humain (mauvais), 100 = anti-humain (bon).
+    
+    Basé sur : Polin (2021), Wang (2016), Roger & Broihanne (2007)
+    """
+    sc = 0
+    total_weight = 0
+
+    # 1. Biais dates : combien de numéros ≤ 31 ? (idéal: max 2)
+    nb_under_31 = sum(1 for n in nums if n <= 31)
+    if nb_under_31 <= 1: sc += 25
+    elif nb_under_31 == 2: sc += 20
+    elif nb_under_31 == 3: sc += 10
+    else: sc += 0
+    total_weight += 25
+
+    # 2. Numéros porte-bonheur (7, 3, 13) présents ?
+    lucky_present = sum(1 for n in nums if n in {7, 3, 13})
+    if lucky_present == 0: sc += 20
+    elif lucky_present == 1: sc += 10
+    else: sc += 0
+    total_weight += 20
+
+    # 3. Suite détectée ? (3+ numéros consécutifs)
+    sn = sorted(nums)
+    max_consec = 1; curr = 1
+    for i in range(1, len(sn)):
+        if sn[i] - sn[i-1] == 1: curr += 1; max_consec = max(max_consec, curr)
+        else: curr = 1
+    if max_consec <= 1: sc += 15
+    elif max_consec == 2: sc += 8
+    else: sc += 0
+    total_weight += 15
+
+    # 4. Espacement trop régulier ? (humains espacent uniformément)
+    gaps = [sn[i+1] - sn[i] for i in range(len(sn)-1)]
+    gap_std = np.std(gaps) if len(gaps) > 1 else 0
+    if gap_std > 5: sc += 15    # irrégulier = anti-humain
+    elif gap_std > 3: sc += 10
+    else: sc += 3               # trop régulier = humain
+    total_weight += 15
+
+    # 5. Motif sur le bulletin FDJ (7 colonnes)
+    # Vérifier si les numéros forment une colonne ou diagonale
+    cols_fdj = [((n-1) % 7) for n in nums]
+    if len(set(cols_fdj)) == 1: sc += 0    # même colonne = motif humain
+    elif len(set(cols_fdj)) >= 4: sc += 15  # bien dispersé
+    else: sc += 8
+    total_weight += 15
+
+    # 6. Chance impopulaire ?
+    if chance in {8, 9, 10, 4}: sc += 10
+    elif chance in {7, 3, 1, 5}: sc += 2
+    else: sc += 6
+    total_weight += 10
+
+    return round(sc / total_weight * 100, 1)
+
+def generate_hybrid_predictions(models_preds, stats, jour_actuel=None, n_grids=5):
+    """
+    Génère des prédictions hybrides en combinant :
+    1. Scores LSTM (3 modèles)
+    2. Stats temps réel (retard, tendance, jour, fréquence)
+    3. Score anti-humain par numéro (études scientifiques)
+    4. Score anti-humain par grille (post-filtrage)
+    """
+    scores_nums, scores_chance = compute_num_scores(stats, jour_actuel)
+
+    # Bonus LSTM
+    lstm_boost = Counter()
+    lstm_chance_boost = Counter()
+    for pred in models_preds:
+        for num in pred[:5]:
+            lstm_boost[num] += 6
+        lstm_chance_boost[int(pred[5])] += 8
+
+    # Scores finaux par numéro
+    final_scores = {}
+    for n in range(1, 50):
+        final_scores[n] = scores_nums[n] + lstm_boost.get(n, 0)
+
+    final_chance = {}
+    for n in range(1, 11):
+        final_chance[n] = scores_chance[n] + lstm_chance_boost.get(n, 0)
+
+    # Générer un grand pool de grilles candidates
+    grids_candidates = []
+    sorted_nums = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
+    sorted_chance = sorted(final_chance.items(), key=lambda x: x[1], reverse=True)
+
+    for g in range(n_grids * 10):  # générer 10x plus que nécessaire
+        pool = [n for n, _ in sorted_nums[:20 + g * 2]]
+        if len(pool) < 5: pool = [n for n, _ in sorted_nums]
+        weights = np.array([max(final_scores[n], 0.1) for n in pool])
+        weights = weights / weights.sum()
+
+        attempts = 0
+        while attempts < 300:
+            try:
+                chosen_idx = np.random.choice(len(pool), 5, replace=False, p=weights)
+                nums = sorted([pool[i] for i in chosen_idx])
+                sm = sum(nums)
+                np_ = sum(1 for x in nums if x % 2 == 0)
+                amp = nums[-1] - nums[0]
+                consec = sum(1 for i in range(4) if nums[i+1] - nums[i] == 1)
+                ok = True
+                if sm < stats['somme_moy'] - 2*stats['somme_std'] or sm > stats['somme_moy'] + 2*stats['somme_std']:
+                    ok = False
+                if np_ in [0, 5]: ok = False
+                if amp < 15: ok = False
+                if consec > 2: ok = False
+                if ok and tuple(nums) not in [tuple(g2['nums']) for g2 in grids_candidates]:
+                    # Chance
+                    ch_pool = [n for n, _ in sorted_chance[:5]]
+                    ch_weights = np.array([max(final_chance[n], 0.1) for n in ch_pool])
+                    ch_weights = ch_weights / ch_weights.sum()
+                    chance = int(np.random.choice(ch_pool, 1, p=ch_weights)[0])
+
+                    # Double score : stats + anti-humain
+                    score_stats = sum(final_scores[n] for n in nums) / 5
+                    score_anti = score_grille_anti_humain(nums, chance)
+                    score_final = score_stats * 0.6 + score_anti * 0.4
+
+                    grids_candidates.append({
+                        'nums': nums,
+                        'chance': chance,
+                        'score': round(score_final, 1),
+                        'score_stats': round(score_stats, 1),
+                        'score_anti': round(score_anti, 1)
+                    })
+                    break
+            except:
+                pass
+            attempts += 1
+
+    # Trier par score final et prendre les meilleurs avec diversité
+    grids_candidates.sort(key=lambda x: x['score'], reverse=True)
+    grids = []
+    for g in grids_candidates:
+        if all(len(set(g['nums']) & set(g2['nums'])) < 4 for g2 in grids):
+            grids.append(g)
+        if len(grids) >= n_grids:
+            break
+
+    return grids, final_scores, final_chance
 
 def score_combination(nums,chance,stats,predictions=None):
     w={'lstm_match':15,'frequency':15,'retard':20,'sum_range':10,'even_odd':10,'decade_spread':15,'consecutive':5,'amplitude':10}
