@@ -209,6 +209,8 @@ class ComboEngine:
         s.min_sum=15; s.max_sum=245; s.allowed_pairs=None; s.max_consecutive=5
         s.min_amplitude=4; s.max_amplitude=48; s.allowed_numer=set(range(1,10))
         s.filters_log=[]; s.excluded_combos=[]; s.exact_sum=None
+        s.position_filters={c: set(range(1,50)) for c in NUM_COLS}  # filtres par position
+        s.position_filters[CHANCE_COL] = set(range(1,11))
     def count_combos(s):
         n=len(s.allowed_nums);ch=len(s.allowed_chance);base=math.comb(n,5)*ch;f=1.0
         if s.exact_sum: f*=0.005
@@ -248,6 +250,23 @@ class ComboEngine:
     def keep_hot(s,n=25): return s.keep_only_numbers([num for num,_ in s.stats['freq_nums'].most_common(n)])
     def exclude_recent(s,n=10): return s.exclude_numbers([num for num,_ in sorted(s.stats['retards'].items(),key=lambda x:x[1])[:n]])
     def apply_optimal_sum(s): s.exact_sum=None; s.set_sum_range(int(s.stats['somme_moy']-s.stats['somme_std']),int(s.stats['somme_moy']+s.stats['somme_std']))
+    def exclude_at_position(s, pos, nums):
+        """Exclure des numéros à une position donnée (0-4 pour nums, 'chance' pour chance)."""
+        col = NUM_COLS[pos] if isinstance(pos, int) and 0 <= pos <= 4 else CHANCE_COL if pos == 'chance' else None
+        if col and col in s.position_filters:
+            rm = [n for n in nums if n in s.position_filters[col]]
+            for n in rm: s.position_filters[col].discard(n)
+            if rm: s.filters_log.append(f"❌ Pos{pos}: exclus {sorted(rm)}")
+            return rm
+        return []
+    def keep_at_position(s, pos, nums):
+        """Garder uniquement ces numéros à une position donnée."""
+        col = NUM_COLS[pos] if isinstance(pos, int) and 0 <= pos <= 4 else CHANCE_COL if pos == 'chance' else None
+        if col and col in s.position_filters:
+            s.position_filters[col] = set(nums) & s.position_filters[col]
+            s.filters_log.append(f"✅ Pos{pos}: gardé {sorted(s.position_filters[col])}")
+            return sorted(s.position_filters[col])
+        return []
     def _passes(s,nums,ch):
         if not all(n in s.allowed_nums for n in nums): return False
         if ch not in s.allowed_chance: return False
@@ -441,6 +460,8 @@ Actions possibles:
 - {{"type": "reset"}} — Réinitialiser tous les filtres
 - {{"type": "generate_grids", "params": {{"n": 10}}}} — Générer N grilles
 - {{"type": "auto_strategy"}} — Appliquer la stratégie optimale automatique
+- {{"type": "exclude_at_position", "params": {{"position": 0, "nums": [5, 10]}}}} — Exclure des numéros à une position (0=1er, 1=2ème, 2=3ème, 3=4ème, 4=5ème, "chance"=chance)
+- {{"type": "keep_at_position", "params": {{"position": 1, "nums": [15, 20, 25]}}}} — Garder uniquement ces numéros à une position
 
 Si l'utilisateur pose une question sur les stats ou demande un conseil SANS action, mets "actions": [].
 Réponds TOUJOURS en JSON valide, rien d'autre."""
@@ -558,6 +579,16 @@ def execute_actions(actions, engine, stats, preds, model, scaler, df_features):
                     results.append(grid_text)
                 else:
                     results.append("⚠️ Trop restrictif, aucune grille.")
+            elif t == "exclude_at_position":
+                pos = p.get("position", 0)
+                nums_p = p.get("nums", [])
+                rm = engine.exclude_at_position(pos, nums_p)
+                results.append(f"❌ Position {pos}: {len(rm)} exclus")
+            elif t == "keep_at_position":
+                pos = p.get("position", 0)
+                nums_p = p.get("nums", [])
+                kept = engine.keep_at_position(pos, nums_p)
+                results.append(f"✅ Position {pos}: {len(kept)} gardés")
         except Exception:
             continue
     return results
@@ -1363,7 +1394,6 @@ def main():
             st.header("🎫 Historique des Tirages")
 
             # --- Dernier tirage info ---
-            # df_full est en ordre ancien→récent, donc le dernier = .iloc[-1]
             dernier_jour = df_full.iloc[-1]['day'] if 'day' in df_full.columns else ''
             dernier_date = df_full.iloc[-1]['month_year'] if 'month_year' in df_full.columns else ''
             st.caption(f"📅 Dernier tirage : **{dernier_jour} {dernier_date}** — {stats['total']} tirages au total")
@@ -1398,46 +1428,143 @@ def main():
 
             st.markdown("---")
 
-            # --- Filtres ---
-            col_f1, col_f2, col_f3 = st.columns(3)
-            with col_f1:
-                search_date = st.text_input("🔍 Recherche par date", placeholder="ex: avril 2026", key="sd")
-            with col_f2:
-                search_num = st.text_input("🔍 Contient le numéro", placeholder="ex: 7", key="sn")
-            with col_f3:
-                nb_display = st.selectbox("Afficher", [20, 50, 100, 200, "Tous"], index=0, key="nd")
-
             # --- Préparer les données (récent en premier) ---
             df_show = df_full.copy()
             df_show = df_show.iloc[::-1].reset_index(drop=True)
 
-            # Appliquer les filtres
+            # --- Filtres par position (style Excel) ---
+            st.markdown("### 🔍 Filtres par position")
+            col_filters = st.columns([2, 1, 1, 1, 1, 1, 1, 1, 1])
+
+            with col_filters[0]:
+                search_date = st.text_input("📅 Date", placeholder="ex: avril 2026", key="sd")
+
+            with col_filters[1]:
+                search_jour = st.selectbox("Jour", ["Tous", "Lundi", "Mercredi", "Samedi"], key="sj")
+
+            # Valeurs possibles par position
+            pos_labels = ["Pos 1", "Pos 2", "Pos 3", "Pos 4", "Pos 5", "Chance"]
+            pos_cols = NUM_COLS + [CHANCE_COL]
+            pos_filters = {}
+
+            for i, (label, col_name) in enumerate(zip(pos_labels, pos_cols)):
+                with col_filters[i + 2]:
+                    vals_uniques = sorted(df_show[col_name].unique().tolist())
+                    options = ["Tous"] + [str(v) for v in vals_uniques]
+                    choix = st.selectbox(label, options, key=f"pf_{i}")
+                    pos_filters[col_name] = choix
+
+            # Bouton reset
+            col_reset, col_count, _ = st.columns([1, 2, 4])
+            with col_reset:
+                if st.button("🔄 Reset filtres", use_container_width=True, key="reset_filtres"):
+                    st.rerun()
+
+            # --- Appliquer les filtres ---
             if search_date:
                 mask = df_show['month_year'].str.contains(search_date, case=False, na=False)
                 mask |= df_show['day'].str.contains(search_date, case=False, na=False)
                 df_show = df_show[mask]
 
-            if search_num:
-                try:
-                    n_search = int(search_num)
-                    mask = pd.Series(False, index=df_show.index)
-                    for c in NUM_COLS:
-                        mask |= (df_show[c] == n_search)
-                    mask |= (df_show[CHANCE_COL] == n_search)
-                    df_show = df_show[mask]
-                except ValueError:
-                    pass
+            if search_jour != "Tous" and 'day' in df_show.columns:
+                df_show = df_show[df_show['day'] == search_jour]
 
-            # --- Stats rapides du filtre ---
-            st.caption(f"**{len(df_show)}** tirages trouvés")
+            for col_name, choix in pos_filters.items():
+                if choix != "Tous":
+                    df_show = df_show[df_show[col_name] == int(choix)]
 
-            # --- Limiter l'affichage ---
+            with col_count:
+                st.markdown(f"**{len(df_show)}** tirages trouvés sur {stats['total']}")
+
+            st.markdown("---")
+
+            # --- Stats du numéro sélectionné ---
+            active_filters = {col: val for col, val in pos_filters.items() if val != "Tous"}
+            if active_filters:
+                st.markdown("### 📊 Analyse des filtres actifs")
+                for col_name, val in active_filters.items():
+                    n = int(val)
+                    pos_label = pos_labels[pos_cols.index(col_name)]
+
+                    if col_name in NUM_COLS:
+                        with st.expander(f"📊 Stats du **{n}** en {pos_label}", expanded=True):
+                            c1, c2, c3, c4 = st.columns(4)
+
+                            # Fréquence à cette position
+                            freq_pos = len(df_full[df_full[col_name] == n])
+                            pct_pos = freq_pos / stats['total'] * 100
+                            with c1:
+                                st.metric(f"Fréq. {pos_label}", f"{freq_pos}x ({pct_pos:.1f}%)")
+
+                            # Fréquence globale (toutes positions)
+                            freq_glob = stats['freq_nums'].get(n, 0)
+                            pct_glob = freq_glob / stats['total'] * 100
+                            with c2:
+                                st.metric("Fréq. globale", f"{freq_glob}x ({pct_glob:.1f}%)")
+
+                            # Retard
+                            retard = stats['retards'].get(n, 0)
+                            with c3:
+                                st.metric("Retard", f"{retard} tirages")
+
+                            # Tendance
+                            tend = stats['tendances'].get(n, {})
+                            ratio_t = tend.get('ratio', 1.0)
+                            with c4:
+                                st.metric("Tendance", f"x{ratio_t:.2f}", delta=f"{'↗' if ratio_t > 1 else '↘'}")
+
+                            # Paires fréquentes avec ce numéro
+                            paires_avec = []
+                            for (a, b), cnt in stats['top_paires']:
+                                if a == n or b == n:
+                                    autre = b if a == n else a
+                                    paires_avec.append((autre, cnt))
+                            if paires_avec:
+                                st.write("**Paires fréquentes :** " + ' · '.join(f"**{a}**({c}x)" for a, c in paires_avec[:5]))
+
+                            # Fréquence par jour
+                            if 'day' in df_full.columns:
+                                jours_str = []
+                                for j in ['Lundi', 'Mercredi', 'Samedi']:
+                                    if j in stats.get('ratios_jour', {}):
+                                        r = stats['ratios_jour'][j].get(n, 1.0)
+                                        jours_str.append(f"{j}: x{r:.2f}")
+                                if jours_str:
+                                    st.write("**Par jour :** " + ' · '.join(jours_str))
+
+                            # Score anti-humain
+                            if n <= 12:
+                                st.caption("⚠️ Numéro ≤12 : très sur-joué (biais dates/mois)")
+                            elif n <= 31:
+                                st.caption("⚠️ Numéro ≤31 : sur-joué (biais jours du mois)")
+                            elif n in {32, 41, 39, 40, 38, 43}:
+                                st.caption("✅ Numéro sous-joué selon l'étude Roger & Broihanne (2007)")
+                            if n in {7, 3, 13}:
+                                st.caption("⚠️ Numéro porte-bonheur : très sur-joué mondialement")
+
+                    elif col_name == CHANCE_COL:
+                        with st.expander(f"⭐ Stats du Chance **{n}**", expanded=True):
+                            c1, c2, c3 = st.columns(3)
+                            freq_ch = stats['freq_chance'].get(n, 0)
+                            ret_ch = stats['retards_chance'].get(n, 0)
+                            with c1:
+                                st.metric("Fréquence", f"{freq_ch}x ({freq_ch/stats['total']*100:.1f}%)")
+                            with c2:
+                                st.metric("Retard", f"{ret_ch} tirages")
+                            with c3:
+                                anti = "✅ Sous-joué" if n in {8, 9, 10, 4} else "⚠️ Sur-joué" if n in {7, 3, 1, 5} else "Neutre"
+                                st.metric("Anti-humain", anti)
+
+                st.markdown("---")
+
+            # --- Pagination ---
+            nb_display = st.selectbox("Afficher", [20, 50, 100, 200, "Tous"], index=0, key="nd")
             if nb_display != "Tous":
                 df_page = df_show.head(int(nb_display))
             else:
                 df_page = df_show
 
-            # --- Affichage des tirages avec boules ---
+            # --- Tableau des tirages ---
             for idx, (_, row) in enumerate(df_page.iterrows()):
                 nums = [int(row[c]) for c in NUM_COLS]
                 ch = int(row[CHANCE_COL])
