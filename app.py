@@ -771,7 +771,7 @@ def main():
 
     # Sidebar
     st.sidebar.title("🎛 Navigation")
-    page=st.sidebar.radio("",["🎯 Grilles Optimisées","🧠 Prédictions LSTM","📊 Statistiques","🔬 Observations Complètes","🔮 Numérologie","⚖ Score ta Grille","📈 Tendances","🎫 Tirages"])
+    page=st.sidebar.radio("",["🎯 Grilles Optimisées","🧠 Prédictions LSTM","📊 Statistiques","🔬 Observations Complètes","🔮 Numérologie","⚖ Score ta Grille","📈 Tendances","🎫 Tirages","🔬 Backtesting"])
 
     # LAYOUT
     page_col,chat_col=st.columns([3,2])
@@ -1585,6 +1585,297 @@ def main():
 
                 if idx < len(df_page) - 1:
                     st.markdown("<hr style='margin:4px 0;border:none;border-top:1px solid rgba(255,255,255,0.05)'>", unsafe_allow_html=True)
+
+        # ═══ BACKTESTING ═══
+        elif page=="🔬 Backtesting":
+            st.header("🔬 Backtesting — Modèles vs Réalité")
+            st.caption("Compare ce que les modèles auraient prédit vs les vrais tirages. Se met à jour automatiquement avec chaque nouveau tirage ajouté.")
+
+            # Sélection de la période
+            nb_tirages = st.selectbox("📊 Analyser les derniers :", [10, 20, 30, 50, 100], index=1, key="bt_nb")
+
+            # Vérifier qu'on a assez de données
+            total_available = len(df_draws) - WINDOW_LENGTH - 1
+            if nb_tirages > total_available:
+                nb_tirages = total_available
+                st.warning(f"Seulement {total_available} tirages disponibles pour le backtesting.")
+
+            if not model and not model_bi and not model_ae:
+                st.error("Aucun modèle disponible pour le backtesting.")
+                st.stop()
+
+            # ═══ CALCUL DU BACKTESTING ═══
+            @st.cache_data
+            def run_backtest(_models_info, _df_features_vals, _scaler_params, _df_draws_vals, nb):
+                """
+                Backtesting : pour chaque tirage, on prédit à partir des données AVANT ce tirage
+                et on compare avec le vrai résultat.
+                """
+                from keras.models import load_model as kl
+                import os
+
+                # Recharger les modèles
+                models = {}
+                for name, path in [('Sequential', MODEL_PATH), ('Bidirectionnel', MODEL_BIDIRECTIONAL_PATH), ('AutoEncoder', MODEL_AUTOENCODER_PATH)]:
+                    if os.path.exists(path):
+                        models[name] = kl(path)
+
+                # Recréer le scaler
+                with open(SCALER_PATH, 'rb') as f:
+                    sc = pickle.load(f)
+
+                results = []
+                total_draws = len(_df_features_vals)
+
+                for i in range(nb):
+                    idx = total_draws - 1 - i  # du plus récent au plus ancien
+                    if idx < WINDOW_LENGTH:
+                        break
+
+                    # Vrai tirage
+                    real = [int(_df_draws_vals[idx][j]) for j in range(6)]
+
+                    # Prédiction de chaque modèle
+                    preds_all = {}
+                    for name, mdl in models.items():
+                        try:
+                            window = _df_features_vals[idx - WINDOW_LENGTH:idx]
+                            scaled = sc.transform(window)
+                            pred_raw = mdl.predict(np.array([scaled]), verbose=0)
+                            nb_f = _df_features_vals.shape[1]
+                            padded = np.zeros((1, nb_f))
+                            padded[0, :NB_LABEL_FEATURES] = pred_raw[0]
+                            raw = sc.inverse_transform(padded)[0, :NB_LABEL_FEATURES]
+                            p = np.round(raw).astype(int)
+                            for j in range(5): p[j] = np.clip(p[j], 1, 49)
+                            p[5] = np.clip(p[5], 1, 10)
+                            nums = list(p[:5]); seen = set()
+                            for j, n in enumerate(nums):
+                                while n in seen: n = n+1 if n < 49 else 1
+                                seen.add(n); nums[j] = n
+                            p[:5] = sorted(nums)
+                            preds_all[name] = list(p)
+                        except:
+                            preds_all[name] = None
+
+                    # Calculer les matchs
+                    real_nums = set(real[:5])
+                    real_chance = real[5]
+                    match_data = {}
+                    for name, pred in preds_all.items():
+                        if pred is None:
+                            match_data[name] = {'nums_match': 0, 'chance_match': False, 'pred': None}
+                        else:
+                            pred_nums = set(pred[:5])
+                            nm = len(real_nums & pred_nums)
+                            cm = pred[5] == real_chance
+                            match_data[name] = {'nums_match': nm, 'chance_match': cm, 'pred': pred}
+
+                    results.append({
+                        'idx': idx,
+                        'real': real,
+                        'matches': match_data
+                    })
+
+                return results
+
+            with st.spinner("🔬 Backtesting en cours..."):
+                bt_results = run_backtest(
+                    None,
+                    df_features.values,
+                    None,
+                    df_draws[ALL_DRAW_COLS].values,
+                    nb_tirages
+                )
+
+            if not bt_results:
+                st.error("Pas assez de données pour le backtesting.")
+                st.stop()
+
+            # ═══ RÉSUMÉ GLOBAL ═══
+            st.markdown("---")
+            st.subheader("📊 Résumé global")
+
+            model_names = list(bt_results[0]['matches'].keys())
+
+            # Stats par modèle
+            for mname in model_names:
+                matches_list = [r['matches'][mname]['nums_match'] for r in bt_results if r['matches'][mname]['pred'] is not None]
+                chance_list = [r['matches'][mname]['chance_match'] for r in bt_results if r['matches'][mname]['pred'] is not None]
+
+                if not matches_list:
+                    continue
+
+                avg_match = np.mean(matches_list)
+                max_match = max(matches_list)
+                chance_pct = sum(chance_list) / len(chance_list) * 100
+                dist = Counter(matches_list)
+
+                # Comparaison avec le hasard
+                # Probabilité au hasard d'avoir k numéros sur 5 parmi 49 :
+                # E[match] ≈ 5*5/49 ≈ 0.51
+                hasard_avg = 5 * 5 / 49
+
+                emoji = "🔵" if "Seq" in mname else "🟢" if "Bi" in mname else "🟠"
+                st.markdown(f"### {emoji} {mname}")
+
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    delta = f"+{avg_match - hasard_avg:.2f} vs hasard" if avg_match > hasard_avg else f"{avg_match - hasard_avg:.2f} vs hasard"
+                    st.metric("Match moyen", f"{avg_match:.2f}/5", delta=delta)
+                with c2:
+                    st.metric("Meilleur match", f"{max_match}/5")
+                with c3:
+                    st.metric("Chance correcte", f"{chance_pct:.1f}%")
+                with c4:
+                    hasard_chance = 10  # 1/10 = 10%
+                    st.metric("Hasard chance", f"{hasard_chance}%", delta=f"{chance_pct - hasard_chance:+.1f}%")
+
+                # Distribution des matchs
+                st.write("**Distribution des matchs :**")
+                dist_str = ' · '.join(f"**{k} nums**: {dist.get(k, 0)}x ({dist.get(k, 0)/len(matches_list)*100:.0f}%)" for k in range(6))
+                st.write(dist_str)
+                st.markdown("---")
+
+            # ═══ COMPARAISON AVEC LE HASARD ═══
+            st.subheader("🎲 Le modèle fait-il mieux que le hasard ?")
+            st.write(f"Au hasard, on s'attend à **{5*5/49:.2f}** numéros corrects par tirage (sur 5).")
+            st.write(f"Au hasard, la chance est correcte **10%** du temps (1 sur 10).")
+
+            all_matches = []
+            for mname in model_names:
+                matches = [r['matches'][mname]['nums_match'] for r in bt_results if r['matches'][mname]['pred'] is not None]
+                if matches:
+                    avg = np.mean(matches)
+                    mieux = "✅ OUI" if avg > 5*5/49 * 1.2 else "⚠️ Marginal" if avg > 5*5/49 else "❌ NON"
+                    st.write(f"**{mname}** : moyenne {avg:.2f}/5 → {mieux} (hasard: {5*5/49:.2f})")
+                    all_matches.extend(matches)
+
+            if all_matches:
+                st.markdown("---")
+                st.write(f"**Combiné (3 modèles)** : moyenne {np.mean(all_matches):.2f}/5")
+
+            # ═══ DÉTAIL TIRAGE PAR TIRAGE ═══
+            st.markdown("---")
+            st.subheader("🔍 Détail tirage par tirage")
+
+            for r in bt_results:
+                real = r['real']
+                real_nums = real[:5]
+                real_ch = real[5]
+
+                # Trouver la date
+                draw_idx = r['idx']
+                if draw_idx < len(df_full):
+                    jour = df_full.iloc[draw_idx]['day'] if 'day' in df_full.columns else ''
+                    date = df_full.iloc[draw_idx]['month_year'] if 'month_year' in df_full.columns else ''
+                else:
+                    jour = ''; date = ''
+
+                with st.expander(f"📅 {jour} {date} — Réel : {' - '.join(str(n) for n in real_nums)} | ⭐{real_ch}"):
+                    for mname, mdata in r['matches'].items():
+                        if mdata['pred'] is None:
+                            st.write(f"**{mname}** : modèle non disponible")
+                            continue
+
+                        pred = mdata['pred']
+                        pred_nums = pred[:5]
+                        pred_ch = pred[5]
+                        nm = mdata['nums_match']
+                        cm = mdata['chance_match']
+
+                        # Identifier les numéros matchés
+                        matched = set(real_nums) & set(pred_nums)
+                        emoji = "🔵" if "Seq" in mname else "🟢" if "Bi" in mname else "🟠"
+
+                        # Afficher avec les numéros matchés en gras
+                        pred_display = []
+                        for n in pred_nums:
+                            if n in matched:
+                                pred_display.append(f"**✅{n}**")
+                            else:
+                                pred_display.append(f"{n}")
+
+                        chance_display = f"**✅{pred_ch}**" if cm else f"{pred_ch}"
+                        status = "🏆" if nm >= 3 else "👍" if nm >= 2 else ""
+
+                        st.write(f"{emoji} **{mname}** : {' - '.join(pred_display)} | ⭐{chance_display} → **{nm}/5** nums {'+chance' if cm else ''} {status}")
+
+            # ═══ ÉVOLUTION DANS LE TEMPS ═══
+            st.markdown("---")
+            st.subheader("📈 Évolution de la performance")
+
+            for mname in model_names:
+                matches_over_time = [r['matches'][mname]['nums_match'] for r in reversed(bt_results) if r['matches'][mname]['pred'] is not None]
+                if len(matches_over_time) >= 5:
+                    # Moyenne glissante sur 5 tirages
+                    rolling = []
+                    for i in range(len(matches_over_time)):
+                        start = max(0, i - 4)
+                        rolling.append(np.mean(matches_over_time[start:i+1]))
+                    emoji = "🔵" if "Seq" in mname else "🟢" if "Bi" in mname else "🟠"
+                    st.write(f"{emoji} **{mname}** — moyenne glissante (5 tirages) :")
+                    chart_data = pd.DataFrame({
+                        'Match': matches_over_time,
+                        'Moy. glissante': rolling,
+                        'Hasard': [5*5/49] * len(matches_over_time)
+                    })
+                    st.line_chart(chart_data)
+
+            # ═══ OBSERVATIONS CLÉS ═══
+            st.markdown("---")
+            st.subheader("💡 Observations clés")
+
+            # Trouver le meilleur match global
+            best_match = 0
+            best_info = None
+            for r in bt_results:
+                for mname, mdata in r['matches'].items():
+                    if mdata['pred'] and mdata['nums_match'] > best_match:
+                        best_match = mdata['nums_match']
+                        best_info = (r, mname)
+
+            if best_info:
+                r, mname = best_info
+                draw_idx = r['idx']
+                jour = df_full.iloc[draw_idx]['day'] if draw_idx < len(df_full) and 'day' in df_full.columns else ''
+                date = df_full.iloc[draw_idx]['month_year'] if draw_idx < len(df_full) and 'month_year' in df_full.columns else ''
+                st.write(f"🏆 **Meilleur match** : {mname} a trouvé **{best_match}/5** numéros le {jour} {date}")
+
+            # Positions les mieux prédites
+            pos_match_count = {c: 0 for c in NUM_COLS}
+            pos_total = 0
+            for r in bt_results:
+                for mname, mdata in r['matches'].items():
+                    if mdata['pred']:
+                        real = r['real']
+                        pred = mdata['pred']
+                        for i, c in enumerate(NUM_COLS):
+                            if real[i] == pred[i]:
+                                pos_match_count[c] += 1
+                        pos_total += 1
+
+            if pos_total > 0:
+                st.write("**Positions les mieux prédites (match exact) :**")
+                pos_labels = ['Pos 1 (petit)', 'Pos 2', 'Pos 3', 'Pos 4', 'Pos 5 (grand)']
+                for c, label in zip(NUM_COLS, pos_labels):
+                    pct = pos_match_count[c] / pos_total * 100
+                    bar = '█' * int(pct * 2)
+                    st.write(f"**{label}** : {pos_match_count[c]}x ({pct:.1f}%) {bar}")
+
+            # Numéros les plus souvent bien prédits
+            well_predicted = Counter()
+            for r in bt_results:
+                real_set = set(r['real'][:5])
+                for mname, mdata in r['matches'].items():
+                    if mdata['pred']:
+                        for n in set(mdata['pred'][:5]) & real_set:
+                            well_predicted[n] += 1
+
+            if well_predicted:
+                st.write("**Numéros les plus souvent bien prédits :**")
+                for n, c in well_predicted.most_common(10):
+                    st.write(f"**{n}** → prédit correctement {c}x")
 
     # ═══ CHATBOT ═══
     with chat_col:
